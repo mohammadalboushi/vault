@@ -1,7 +1,6 @@
-const CACHE_NAME = 'vault-cache-v5';
+const CACHE_NAME = 'vault-cache-v7';
 
 const urlsToCache = [
-  const urlsToCache = [
   './',
   './index.html',
   './style.css',
