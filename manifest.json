@@ -1,9 +1,9 @@
 {
 "name": "خزنة أسراري",
 "short_name": "الخزنة",
-"id": "/my-vault/",
-"start_url": "/my-vault/",
-"scope": "/my-vault/",
+"id": "./",
+"start_url": "./",
+"scope": "./",
 "display": "standalone",
 "background_color": "#0f172a",
 "theme_color": "#0f172a",

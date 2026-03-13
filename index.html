@@ -20,7 +20,7 @@
     
     <link rel="icon" href="https://mr-android-223.github.io/my-vault/icon.png" sizes="192x192">
     <link rel="apple-touch-icon" href="https://mr-android-223.github.io/my-vault/icon.png">
-    <link rel="manifest" href="/my-vault/manifest.json">
+    <link rel="manifest" href="./manifest.json">
 <meta name="mobile-web-app-capable" content="yes">
 
     <script type="application/ld+json">
@@ -311,9 +311,7 @@
 
 <script>
 if ('serviceWorker' in navigator) {
-navigator.serviceWorker.register('/my-vault/sw.js', {
-scope: '/my-vault/'
-});
+  navigator.serviceWorker.register('./sw.js');
 }
 </script>
 

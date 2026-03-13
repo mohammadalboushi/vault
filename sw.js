@@ -1,12 +1,13 @@
 const CACHE_NAME = 'vault-cache-v5';
 
 const urlsToCache = [
-  '/my-vault/',
-  '/my-vault/index.html',
-  '/my-vault/style.css',
-  '/my-vault/script.js',
-  '/my-vault/icon.png',
-  '/my-vault/manifest.json'
+  const urlsToCache = [
+  './',
+  './index.html',
+  './style.css',
+  './script.js',
+  './icon.png',
+  './manifest.json'
 ];
 
 self.addEventListener('install', event => {
