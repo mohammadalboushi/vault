@@ -11,17 +11,14 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const db = firebase.firestore();
-
-// السحر هنا: تفعيل نظام الأوفلاين الأصلي من فايربيز
-db.enablePersistence({ synchronizeTabs: true })
-  .catch(function(err) {
-      console.warn("تنبيه: ميزة الأوفلاين قد لا تعمل بالكامل في هذا المتصفح", err);
-  });
-
 const provider = new firebase.auth.GoogleAuthProvider();
 
-let accounts = [];
-let folders = ["عام", "فيسبوك", "جوجل"];
+// 1. تحميل البيانات من الذاكرة المحلية فوراً (استجابة بثانية واحدة)
+let localData = JSON.parse(localStorage.getItem('my_vault_db')) || {};
+let accounts = localData.accounts || [];
+let folders = localData.folders || ["عام", "فيسبوك", "جوجل"];
+let lastModified = localData.lastModified || 0; // الطابع الزمني الذكي
+
 let unsubscribeVault = null;
 
 let longPressTimer, isLongPress = false;
@@ -54,7 +51,7 @@ auth.onAuthStateChanged(user => {
             userAvatarEl.innerHTML = `<img src="${photoUrl}" alt="User">`;
         }
         
-        // جلب البيانات واستمرار المزامنة
+        // تشغيل مراقب السحابة
         setupRealtimeListener(user.uid);
     } else {
         loginContainer.style.display = 'block';
@@ -69,59 +66,74 @@ auth.onAuthStateChanged(user => {
             unsubscribeVault = null;
         }
         
-        accounts = [];
-        folders = ["عام", "فيسبوك", "جوجل"];
         setSyncLoader(false, true);
-        
-        if (document.getElementById('vaultPage').style.display === 'flex') {
-            renderFoldersBar();
-            renderVault();
-        }
     }
 });
 
+// 2. نظام المزامنة الذكي (لا يمسح البيانات أبداً)
 function setupRealtimeListener(uid) {
     setSyncLoader(true);
-    // فايربيز سيقوم بطلب البيانات من الذاكرة المؤقتة (بدون نت) أو من السحابة (بوجود نت) بشكل تلقائي
     unsubscribeVault = db.collection('vaults').doc(uid).onSnapshot(docSnap => {
         if(docSnap.exists) {
-            const data = docSnap.data();
-            accounts = data.accounts || [];
-            folders = data.folders || ["عام", "فيسبوك", "جوجل"];
+            const cloudData = docSnap.data();
+            const cloudModified = cloudData.lastModified || 0;
+
+            if (lastModified > cloudModified) {
+                // بيانات جوالك أحدث (لأنك ضفت شيء وأنت أوفلاين)، ارفعها للسحابة!
+                saveToCloud();
+            } else if (cloudModified > lastModified) {
+                // بيانات السحابة أحدث (لأنك ضفت شيء من جوالك الثاني)، نزلها للجوال!
+                accounts = cloudData.accounts || [];
+                folders = cloudData.folders || ["عام", "فيسبوك", "جوجل"];
+                lastModified = cloudModified;
+                localStorage.setItem('my_vault_db', JSON.stringify({ accounts, folders, lastModified }));
+                
+                if (document.getElementById('vaultPage').style.display === 'flex') {
+                    renderFoldersBar();
+                    renderVault();
+                }
+            }
+            // إذا كانوا متساويين، لا تفعل شيئاً.
         } else {
-            // إذا كان الحساب جديداً تماماً
-            accounts = [];
-            folders = ["عام", "فيسبوك", "جوجل"];
-            saveData(); 
-        }
-        applySort(currentSort, false); 
-        
-        if (document.getElementById('vaultPage').style.display === 'flex') {
-            renderFoldersBar();
-            renderVault();
+            // السحابة فارغة تماماً، ارفع كل شغلك!
+            if (accounts.length > 0) saveToCloud();
         }
         setSyncLoader(false);
     }, error => {
-        console.error("خطأ المزامنة:", error);
+        console.error("خطأ بالمزامنة", error);
         setSyncLoader(false, true);
     });
 }
 
+// 3. دالة الحفظ الأساسية
 function saveData() {
-    const user = auth.currentUser;
-    if(user) {
-        setSyncLoader(true);
-        // حتى لو كنت أوفلاين، سيحفظ التعديل هنا، ويرفعه للسحابة فور عودة الإنترنت
-        db.collection('vaults').doc(user.uid).set({
-            accounts: accounts,
-            folders: folders
-        }).then(() => {
-            setSyncLoader(false);
-        }).catch(error => {
-            console.log("تم الحفظ بانتظار عودة الإنترنت للمزامنة");
-            setSyncLoader(false, true);
-        });
+    lastModified = Date.now(); // تحديث الوقت للوقت الحالي
+    localStorage.setItem('my_vault_db', JSON.stringify({ accounts, folders, lastModified }));
+    
+    if (document.getElementById('vaultPage').style.display === 'flex') {
+        renderFoldersBar();
+        renderVault();
     }
+    
+    // محاولة الرفع للسحابة
+    if (auth.currentUser) {
+        saveToCloud();
+    }
+}
+
+function saveToCloud() {
+    if (!auth.currentUser) return;
+    setSyncLoader(true);
+    db.collection('vaults').doc(auth.currentUser.uid).set({
+        accounts: accounts,
+        folders: folders,
+        lastModified: lastModified
+    }).then(() => {
+        setSyncLoader(false);
+    }).catch(err => {
+        // إذا فشل (بسبب عدم وجود نت)، ستبقى البيانات بأمان في الجوال وستُرفع لاحقاً
+        setSyncLoader(false, true);
+    });
 }
 
 // ======================= دوال الواجهة والقوائم ======================= //
@@ -178,9 +190,9 @@ function startGoogleLogin() {
 
 function handleGoogleLogout() {
     closeSideMenu();
-    customConfirm("هل تريد تسجيل الخروج؟", () => {
+    customConfirm("هل تريد تسجيل الخروج؟ ستبقى البيانات محفوظة بجهازك.", () => {
         auth.signOut().then(() => {
-            showToast("تم تسجيل الخروج.");
+            showToast("تم تسجيل الخروج");
         });
     });
 }
@@ -253,7 +265,6 @@ function importDataWrapper(e) {
             });
 
             saveData();
-            renderFoldersBar();
             applySort(currentSort);
 
             if (cleanAccounts.length === 0 && rawAccounts.length > 0) {
@@ -360,11 +371,8 @@ function submitPassword() {
     pendingCallback = null;
 }
 
+// أزلنا قيود تسجيل الدخول نهائياً من هنا
 function prepareSaveAccount() {
-    if (!auth.currentUser) {
-        showToast("اتصل بحساب جوجل أولاً");
-        return;
-    }
     const email = document.getElementById('emailInput').value.trim();
     if (!email) {
         showToast("أدخل البيانات أولاً");
@@ -500,7 +508,6 @@ function deleteSelected() {
             accounts = accounts.filter(acc => !selectedIds.has(acc.id));
             saveData();
             toggleSelectionMode(); 
-            renderFoldersBar();
             showToast("تم الحذف");
         });
     };
@@ -690,8 +697,6 @@ function ctxAction(action) {
                 customConfirm("حذف نهائي؟", () => {
                     accounts = accounts.filter(a => a.id !== currentCtxId);
                     saveData();
-                    renderVault();
-                    renderFoldersBar();
                     showToast("تم الحذف");
                 });
             };
@@ -711,8 +716,6 @@ function ctxAction(action) {
                 document.getElementById('passInput').value = acc.pass;
                 accounts = accounts.filter(a => a.id !== currentCtxId);
                 saveData(); 
-                renderVault();
-                renderFoldersBar();
                 if(document.getElementById('vaultPage').style.display === 'flex') goBack();
             };
 
@@ -767,14 +770,9 @@ function handleVaultLongPress() {
     });
 }
 
+// أزلنا قيود الدخول نهائياً من زر المحفوظات (تفتح فوراً)
 function openVaultCheck() {
     if(isLongPress) return;
-    
-    // فايربيز صار يتذكر إذا أنت مسجل دخول حتى لو مافي نت بفضل الـ Persistence
-    if (!auth.currentUser) {
-        showToast("اتصل بحساب جوجل أولاً للتمكن من العمل");
-        return;
-    }
 
     const vp = localStorage.getItem('vaultPass');
     if(vp) openPasswordModal("رمز الخزنة", v => { if(v===vp) openVault(); else showToast("خطأ"); });
@@ -830,12 +828,12 @@ function sendToKodular(message) {
     }
 }
 
-// دالة الوضع الليلي والفاتح
 document.addEventListener('DOMContentLoaded', () => {
     document.documentElement.removeAttribute('data-theme');
     const savedTheme = localStorage.getItem('theme');
     const themeIcon = document.getElementById('themeIcon');
     
+    // الأساسي أبيض (إذا مافي شي محفوظ أو إذا محفوظ فاتح)
     if (savedTheme === 'dark') {
         document.body.classList.add('dark-theme');
         if(themeIcon) themeIcon.innerText = "☀️";
@@ -848,6 +846,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (vaultList) {
         vaultList.addEventListener('scroll', cancelPress);
     }
+    
+    // إظهار المجلدات والحسابات فوراً عند فتح التطبيق أوفلاين
+    renderFoldersBar();
+    renderVault();
 });
 
 function toggleTheme() {
