@@ -153,7 +153,11 @@ function setupRealtimeListener(uid) {
             saveToCloud(); 
         }
         applySort(currentSort, false); 
+        
+        // التحديث السحري: نحدث الأرقام والقائمة معاً فوراً
         renderFoldersBar();
+        renderVault();
+        
         setSyncLoader(false);
     }, error => {
         console.error(error);
@@ -841,12 +845,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const savedTheme = localStorage.getItem('theme');
     const themeIcon = document.getElementById('themeIcon');
     
-    if (savedTheme === 'light') {
-        document.body.classList.remove('dark-theme');
-        if(themeIcon) themeIcon.innerText = "🌙";
-    } else {
+    // التعديل هنا: الوضع الفاتح هو الأساسي (إلا إذا كان المستخدم مختار ليلي مسبقاً)
+    if (savedTheme === 'dark') {
         document.body.classList.add('dark-theme');
         if(themeIcon) themeIcon.innerText = "☀️";
+    } else {
+        document.body.classList.remove('dark-theme');
+        if(themeIcon) themeIcon.innerText = "🌙";
     }
 
     const vaultList = document.getElementById('vaultList');
