@@ -66,8 +66,13 @@ auth.onAuthStateChanged(user => {
             unsubscribeVault();
             unsubscribeVault = null;
         }
-        accounts = [];
-        folders = ["عام"];
+        
+        const localAccs = localStorage.getItem('localVaultAccounts');
+        const localFolds = localStorage.getItem('localVaultFolders');
+        accounts = localAccs ? JSON.parse(localAccs) : [];
+        folders = localFolds ? JSON.parse(localFolds) : ["عام"];
+        
+        renderVault();
         setSyncLoader(false, true);
     }
 });
@@ -128,10 +133,12 @@ function handleGoogleLogout() {
     closeSideMenu();
     customConfirm("هل تريد تسجيل الخروج؟", () => {
         auth.signOut().then(() => {
+            localStorage.removeItem('localVaultAccounts');
+            localStorage.removeItem('localVaultFolders');
             accounts = [];
             folders = ["عام"];
             renderVault();
-            showToast("تم تسجيل الخروج");
+            showToast("تم تسجيل الخروج وتأمين الخزنة");
         });
     });
 }
@@ -150,21 +157,45 @@ function setSyncLoader(isSyncing, isError = false) {
 function setupRealtimeListener(uid) {
     setSyncLoader(true);
     unsubscribeVault = db.collection('vaults').doc(uid).onSnapshot(docSnap => {
+        let cloudAccounts = [];
+        let cloudFolders = ["عام", "فيسبوك", "جوجل"];
+        let needsMerge = false;
+
         if(docSnap.exists) {
             const data = docSnap.data();
-            accounts = data.accounts || [];
-            folders = data.folders || ["عام", "فيسبوك", "جوجل"];
-        } else {
-            accounts = [];
-            folders = ["عام", "فيسبوك", "جوجل"];
-            saveToCloud(); 
+            cloudAccounts = data.accounts || [];
+            cloudFolders = data.folders || ["عام", "فيسبوك", "جوجل"];
         }
-        applySort(currentSort, false); 
+
+        const localAccs = localStorage.getItem('localVaultAccounts');
+        const localFolds = localStorage.getItem('localVaultFolders');
         
-        // التحديث السحري: نحدث الأرقام والقائمة معاً فوراً
+        if (localAccs) {
+            const parsedLocalAccs = JSON.parse(localAccs);
+            if (parsedLocalAccs.length > 0) {
+                needsMerge = true;
+                cloudAccounts = [...cloudAccounts, ...parsedLocalAccs];
+                if (localFolds) {
+                    const parsedLocalFolds = JSON.parse(localFolds);
+                    parsedLocalFolds.forEach(f => {
+                        if (!cloudFolders.includes(f)) cloudFolders.push(f);
+                    });
+                }
+            }
+            localStorage.removeItem('localVaultAccounts');
+            localStorage.removeItem('localVaultFolders');
+        }
+
+        accounts = cloudAccounts;
+        folders = cloudFolders;
+
+        if (needsMerge || !docSnap.exists) {
+            saveToCloud();
+        }
+
+        applySort(currentSort, false); 
         renderFoldersBar();
         renderVault();
-        
         setSyncLoader(false);
     }, error => {
         console.error(error);
@@ -187,6 +218,9 @@ function saveToCloud() {
             setSyncLoader(false, true);
             showToast("حدث خطأ أثناء الحفظ");
         });
+    } else {
+        localStorage.setItem('localVaultAccounts', JSON.stringify(accounts));
+        localStorage.setItem('localVaultFolders', JSON.stringify(folders));
     }
 }
 
@@ -358,11 +392,6 @@ function submitPassword() {
 
 // الإضافة مسموحة دائماً بدون قفل
 function prepareSaveAccount() {
-    if (!auth.currentUser) {
-        showToast("اتصل بحساب جوجل من القائمة أولاً");
-        return;
-    }
-
     const email = document.getElementById('emailInput').value.trim();
     if (!email) {
         showToast("أدخل البيانات أولاً");
@@ -775,11 +804,6 @@ function handleVaultLongPress() {
 function openVaultCheck() {
     if(isLongPress) return;
     
-    if (!auth.currentUser) {
-        showToast("اتصل بحساب جوجل من القائمة أولاً");
-        return;
-    }
-
     const vp = localStorage.getItem('vaultPass');
     if(vp) openPasswordModal("رمز الخزنة", v => { if(v===vp) openVault(); else showToast("خطأ"); });
     else openVault();
