@@ -11,6 +11,13 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const db = firebase.firestore();
+
+// السحر هنا: تفعيل قاعدة البيانات لتعمل أوفلاين بذكاء
+db.enablePersistence()
+  .catch(function(err) {
+      console.log("خطأ في تفعيل الأوفلاين: ", err.code);
+  });
+
 const provider = new firebase.auth.GoogleAuthProvider();
 
 let accounts = [];
