@@ -13,14 +13,13 @@ const auth = firebase.auth();
 const db = firebase.firestore();
 const provider = new firebase.auth.GoogleAuthProvider();
 
-// 1. تحميل البيانات من الذاكرة المحلية فوراً (استجابة بثانية واحدة)
-let localData = JSON.parse(localStorage.getItem('my_vault_db')) || {};
-let accounts = localData.accounts || [];
-let folders = localData.folders || ["عام", "فيسبوك", "جوجل"];
-let lastModified = localData.lastModified || 0; // الطابع الزمني الذكي
+// 1. المصدر الأساسي للبيانات: الذاكرة المحلية (تفتح فوراً بدون انتظار الإنترنت)
+let localDb = JSON.parse(localStorage.getItem('my_vault_db')) || {};
+let accounts = localDb.accounts || [];
+let folders = localDb.folders || ["عام", "فيسبوك", "جوجل"];
+let lastSyncTime = localDb.lastSyncTime || 0; // الطابع الزمني الذكي
 
 let unsubscribeVault = null;
-
 let longPressTimer, isLongPress = false;
 let currentCtxId = null, currentCtxType = null;
 let pendingCallback = null;
@@ -32,6 +31,7 @@ let folderRenameTarget = null;
 let vaultPressTimer = null;
 let currentSort = 'newest';
 
+// 2. مراقبة حالة تسجيل الدخول (لا تمسح البيانات عند الخروج لتظل متوفرة أوفلاين)
 auth.onAuthStateChanged(user => {
     const userNameEl = document.getElementById('userName');
     const userEmailEl = document.getElementById('userEmail');
@@ -42,21 +42,15 @@ auth.onAuthStateChanged(user => {
     if (user) {
         loginContainer.style.display = 'none';
         logoutContainer.style.display = 'block';
-        
         if(userNameEl) userNameEl.innerText = user.displayName || "مستخدم";
         if(userEmailEl) userEmailEl.innerText = user.email || "";
+        if(user.photoURL && userAvatarEl) userAvatarEl.innerHTML = `<img src="${user.photoURL}" alt="User">`;
         
-        const photoUrl = user.photoURL;
-        if(photoUrl && userAvatarEl) {
-            userAvatarEl.innerHTML = `<img src="${photoUrl}" alt="User">`;
-        }
-        
-        // تشغيل مراقب السحابة
+        // بدء المزامنة الذكية
         setupRealtimeListener(user.uid);
     } else {
         loginContainer.style.display = 'block';
         logoutContainer.style.display = 'none';
-        
         if(userNameEl) userNameEl.innerText = "مستخدم زائر";
         if(userEmailEl) userEmailEl.innerText = "سجل الدخول للمزامنة";
         if(userAvatarEl) userAvatarEl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
@@ -65,76 +59,81 @@ auth.onAuthStateChanged(user => {
             unsubscribeVault();
             unsubscribeVault = null;
         }
-        
         setSyncLoader(false, true);
     }
 });
 
-// 2. نظام المزامنة الذكي (لا يمسح البيانات أبداً)
+// 3. المزامنة الذكية التي تقارن الوقت وتمنع مسح البيانات
 function setupRealtimeListener(uid) {
     setSyncLoader(true);
     unsubscribeVault = db.collection('vaults').doc(uid).onSnapshot(docSnap => {
-        if(docSnap.exists) {
-            const cloudData = docSnap.data();
-            const cloudModified = cloudData.lastModified || 0;
+        // تجاهل التحديثات الوهمية لتجنب تصفير البيانات
+        if (docSnap.metadata.hasPendingWrites) return;
 
-            if (lastModified > cloudModified) {
-                // بيانات جوالك أحدث (لأنك ضفت شيء وأنت أوفلاين)، ارفعها للسحابة!
-                saveToCloud();
-            } else if (cloudModified > lastModified) {
-                // بيانات السحابة أحدث (لأنك ضفت شيء من جوالك الثاني)، نزلها للجوال!
+        if (docSnap.exists) {
+            const cloudData = docSnap.data();
+            const cloudTime = cloudData.lastSyncTime || 0;
+
+            if (cloudTime > lastSyncTime) {
+                // السحابة أحدث (تمت إضافة بيانات من جهاز آخر): نحدث هذا الجوال
                 accounts = cloudData.accounts || [];
                 folders = cloudData.folders || ["عام", "فيسبوك", "جوجل"];
-                lastModified = cloudModified;
-                localStorage.setItem('my_vault_db', JSON.stringify({ accounts, folders, lastModified }));
+                lastSyncTime = cloudTime;
+                localStorage.setItem('my_vault_db', JSON.stringify({ accounts, folders, lastSyncTime }));
                 
                 if (document.getElementById('vaultPage').style.display === 'flex') {
                     renderFoldersBar();
                     renderVault();
                 }
+            } else if (lastSyncTime > cloudTime) {
+                // هذا الجوال أحدث (تمت إضافة ملاحظات أوفلاين): نرفع للسحابة
+                pushToCloud();
             }
-            // إذا كانوا متساويين، لا تفعل شيئاً.
         } else {
-            // السحابة فارغة تماماً، ارفع كل شغلك!
-            if (accounts.length > 0) saveToCloud();
+            // السحابة فارغة: نرفع كل ما في الجوال لحمايته
+            if (accounts.length > 0) pushToCloud();
         }
         setSyncLoader(false);
-    }, error => {
-        console.error("خطأ بالمزامنة", error);
+    }, err => {
+        console.warn("المزامنة معلقة (أوفلاين)");
         setSyncLoader(false, true);
     });
 }
 
-// 3. دالة الحفظ الأساسية
+// 4. الحفظ دائمًا على الجوال فوراً، ثم محاولة الرفع
 function saveData() {
-    lastModified = Date.now(); // تحديث الوقت للوقت الحالي
-    localStorage.setItem('my_vault_db', JSON.stringify({ accounts, folders, lastModified }));
+    lastSyncTime = Date.now();
+    localStorage.setItem('my_vault_db', JSON.stringify({ accounts, folders, lastSyncTime }));
     
     if (document.getElementById('vaultPage').style.display === 'flex') {
         renderFoldersBar();
         renderVault();
     }
     
-    // محاولة الرفع للسحابة
-    if (auth.currentUser) {
-        saveToCloud();
-    }
+    pushToCloud();
 }
 
-function saveToCloud() {
+function pushToCloud() {
     if (!auth.currentUser) return;
     setSyncLoader(true);
     db.collection('vaults').doc(auth.currentUser.uid).set({
         accounts: accounts,
         folders: folders,
-        lastModified: lastModified
+        lastSyncTime: lastSyncTime
     }).then(() => {
         setSyncLoader(false);
     }).catch(err => {
-        // إذا فشل (بسبب عدم وجود نت)، ستبقى البيانات بأمان في الجوال وستُرفع لاحقاً
+        // سيعاد المحاولة تلقائياً عند عودة الإنترنت
         setSyncLoader(false, true);
     });
 }
+
+// دفع البيانات فور استشعار المتصفح لعودة الإنترنت
+window.addEventListener('online', () => {
+    if (auth.currentUser && accounts.length > 0) {
+        pushToCloud();
+    }
+});
 
 // ======================= دوال الواجهة والقوائم ======================= //
 
@@ -190,7 +189,7 @@ function startGoogleLogin() {
 
 function handleGoogleLogout() {
     closeSideMenu();
-    customConfirm("هل تريد تسجيل الخروج؟ ستبقى البيانات محفوظة بجهازك.", () => {
+    customConfirm("هل تريد تسجيل الخروج؟ ستبقى البيانات في جهازك.", () => {
         auth.signOut().then(() => {
             showToast("تم تسجيل الخروج");
         });
@@ -371,7 +370,7 @@ function submitPassword() {
     pendingCallback = null;
 }
 
-// أزلنا قيود تسجيل الدخول نهائياً من هنا
+// إضافة حساب لا تتطلب تسجيل الدخول الآن
 function prepareSaveAccount() {
     const email = document.getElementById('emailInput').value.trim();
     if (!email) {
@@ -770,7 +769,7 @@ function handleVaultLongPress() {
     });
 }
 
-// أزلنا قيود الدخول نهائياً من زر المحفوظات (تفتح فوراً)
+// أزلنا قيود الدخول نهائياً، يفتح فوراً
 function openVaultCheck() {
     if(isLongPress) return;
 
@@ -828,12 +827,13 @@ function sendToKodular(message) {
     }
 }
 
+// تحميل الألوان والبيانات فوراً
 document.addEventListener('DOMContentLoaded', () => {
     document.documentElement.removeAttribute('data-theme');
     const savedTheme = localStorage.getItem('theme');
     const themeIcon = document.getElementById('themeIcon');
     
-    // الأساسي أبيض (إذا مافي شي محفوظ أو إذا محفوظ فاتح)
+    // الأساسي فاتح (إذا كان محفوظ داكن فقط بيشغل الداكن)
     if (savedTheme === 'dark') {
         document.body.classList.add('dark-theme');
         if(themeIcon) themeIcon.innerText = "☀️";
@@ -847,7 +847,7 @@ document.addEventListener('DOMContentLoaded', () => {
         vaultList.addEventListener('scroll', cancelPress);
     }
     
-    // إظهار المجلدات والحسابات فوراً عند فتح التطبيق أوفلاين
+    // إظهار البيانات فوراً بدون انتظار
     renderFoldersBar();
     renderVault();
 });
