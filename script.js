@@ -11,13 +11,17 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const db = firebase.firestore();
+
+// السحر هنا: تفعيل نظام الأوفلاين الأصلي من فايربيز
+db.enablePersistence({ synchronizeTabs: true })
+  .catch(function(err) {
+      console.warn("تنبيه: ميزة الأوفلاين قد لا تعمل بالكامل في هذا المتصفح", err);
+  });
+
 const provider = new firebase.auth.GoogleAuthProvider();
 
-// سحب البيانات من الذاكرة المحلية أولاً ليعمل التطبيق أوفلاين
-let localData = JSON.parse(localStorage.getItem('my_vault_db')) || {};
-let accounts = localData.accounts || [];
-let folders = localData.folders || ["عام", "فيسبوك", "جوجل"];
-
+let accounts = [];
+let folders = ["عام", "فيسبوك", "جوجل"];
 let unsubscribeVault = null;
 
 let longPressTimer, isLongPress = false;
@@ -50,8 +54,8 @@ auth.onAuthStateChanged(user => {
             userAvatarEl.innerHTML = `<img src="${photoUrl}" alt="User">`;
         }
         
-        // المزامنة الذكية عند تسجيل الدخول
-        syncOnceThenListen(user.uid);
+        // جلب البيانات واستمرار المزامنة
+        setupRealtimeListener(user.uid);
     } else {
         loginContainer.style.display = 'block';
         logoutContainer.style.display = 'none';
@@ -65,11 +69,8 @@ auth.onAuthStateChanged(user => {
             unsubscribeVault = null;
         }
         
-        // عند تسجيل الخروج، نبقي البيانات المحلية كما هي للعمل أوفلاين
-        let savedData = JSON.parse(localStorage.getItem('my_vault_db')) || {};
-        accounts = savedData.accounts || [];
-        folders = savedData.folders || ["عام", "فيسبوك", "جوجل"];
-        
+        accounts = [];
+        folders = ["عام", "فيسبوك", "جوجل"];
         setSyncLoader(false, true);
         
         if (document.getElementById('vaultPage').style.display === 'flex') {
@@ -79,45 +80,52 @@ auth.onAuthStateChanged(user => {
     }
 });
 
-// دمج البيانات المحلية مع السحابية
-function mergeLocalAndCloud(cloudData) {
-    let localData = JSON.parse(localStorage.getItem('my_vault_db')) || { accounts: [], folders: ["عام", "فيسبوك", "جوجل"] };
-    if (!cloudData) return localData;
-    
-    // دمج المجلدات بدون تكرار
-    let mergedFolders = [...new Set([...(localData.folders || []), ...(cloudData.folders || [])])];
-    if(mergedFolders.length === 0) mergedFolders = ["عام", "فيسبوك", "جوجل"];
-
-    // دمج الحسابات بدون تكرار (بالاعتماد على الإيميل واسم المجلد)
-    let mergedAccounts = [...(cloudData.accounts || [])];
-    let cloudCombos = new Set(mergedAccounts.map(a => `${(a.email||"").trim().toLowerCase()}|${a.folder}`));
-    
-    (localData.accounts || []).forEach(localAcc => {
-        let combo = `${(localAcc.email||"").trim().toLowerCase()}|${localAcc.folder}`;
-        if (!cloudCombos.has(combo)) {
-            mergedAccounts.push(localAcc);
-            cloudCombos.add(combo);
-        }
-    });
-    
-    return { accounts: mergedAccounts, folders: mergedFolders };
-}
-
-function syncOnceThenListen(uid) {
+function setupRealtimeListener(uid) {
     setSyncLoader(true);
-    db.collection('vaults').doc(uid).get().then(doc => {
-        let cloudData = doc.exists ? doc.data() : null;
-        let merged = mergeLocalAndCloud(cloudData);
-        accounts = merged.accounts;
-        folders = merged.folders;
-        saveData(); // حفظ الناتج المدموج في الجهاز والسحابة
-        setupRealtimeListener(uid);
-    }).catch(err => {
-        setupRealtimeListener(uid); // بحال وجود خطأ بالاتصال
+    // فايربيز سيقوم بطلب البيانات من الذاكرة المؤقتة (بدون نت) أو من السحابة (بوجود نت) بشكل تلقائي
+    unsubscribeVault = db.collection('vaults').doc(uid).onSnapshot(docSnap => {
+        if(docSnap.exists) {
+            const data = docSnap.data();
+            accounts = data.accounts || [];
+            folders = data.folders || ["عام", "فيسبوك", "جوجل"];
+        } else {
+            // إذا كان الحساب جديداً تماماً
+            accounts = [];
+            folders = ["عام", "فيسبوك", "جوجل"];
+            saveData(); 
+        }
+        applySort(currentSort, false); 
+        
+        if (document.getElementById('vaultPage').style.display === 'flex') {
+            renderFoldersBar();
+            renderVault();
+        }
+        setSyncLoader(false);
+    }, error => {
+        console.error("خطأ المزامنة:", error);
+        setSyncLoader(false, true);
     });
 }
 
-// دوال القائمة الجانبية (السحب)
+function saveData() {
+    const user = auth.currentUser;
+    if(user) {
+        setSyncLoader(true);
+        // حتى لو كنت أوفلاين، سيحفظ التعديل هنا، ويرفعه للسحابة فور عودة الإنترنت
+        db.collection('vaults').doc(user.uid).set({
+            accounts: accounts,
+            folders: folders
+        }).then(() => {
+            setSyncLoader(false);
+        }).catch(error => {
+            console.log("تم الحفظ بانتظار عودة الإنترنت للمزامنة");
+            setSyncLoader(false, true);
+        });
+    }
+}
+
+// ======================= دوال الواجهة والقوائم ======================= //
+
 function safeToggleMenu(e) {
     if(e) e.stopPropagation();
     const menu = document.getElementById('sideMenu');
@@ -164,7 +172,6 @@ function startGoogleLogin() {
     closeSideMenu();
     showToast("جاري الاتصال بجوجل...");
     auth.signInWithPopup(provider).catch(error => {
-        console.error(error);
         showToast("فشل الدخول");
     });
 }
@@ -173,7 +180,7 @@ function handleGoogleLogout() {
     closeSideMenu();
     customConfirm("هل تريد تسجيل الخروج؟", () => {
         auth.signOut().then(() => {
-            showToast("تم تسجيل الخروج. بياناتك لا تزال محفوظة بجهازك.");
+            showToast("تم تسجيل الخروج.");
         });
     });
 }
@@ -186,55 +193,6 @@ function setSyncLoader(isSyncing, isError = false) {
         } else {
             dot.className = isSyncing ? 'sync-dot syncing' : 'sync-dot synced';
         }
-    }
-}
-
-function setupRealtimeListener(uid) {
-    setSyncLoader(true);
-    unsubscribeVault = db.collection('vaults').doc(uid).onSnapshot(docSnap => {
-        if(docSnap.exists) {
-            const data = docSnap.data();
-            accounts = data.accounts || [];
-            folders = data.folders || ["عام", "فيسبوك", "جوجل"];
-            
-            // تحديث الذاكرة المحلية عشان تظل البيانات حديثة للأوفلاين
-            localStorage.setItem('my_vault_db', JSON.stringify({ accounts, folders }));
-        } else {
-            accounts = [];
-            folders = ["عام", "فيسبوك", "جوجل"];
-            saveData(); 
-        }
-        applySort(currentSort, false); 
-        
-        if (document.getElementById('vaultPage').style.display === 'flex') {
-            renderFoldersBar();
-            renderVault();
-        }
-        setSyncLoader(false);
-    }, error => {
-        console.error(error);
-        setSyncLoader(false, true);
-    });
-}
-
-// الدالة الأهم: الحفظ المحلي والسحابي المشترك
-function saveData() {
-    // 1. الحفظ الداخلي الدائم والسريع (أوفلاين)
-    localStorage.setItem('my_vault_db', JSON.stringify({ accounts, folders }));
-    
-    // 2. الرفع السحابي إذا كان مسجل دخول
-    const user = auth.currentUser;
-    if(user) {
-        setSyncLoader(true);
-        db.collection('vaults').doc(user.uid).set({
-            accounts: accounts,
-            folders: folders
-        }).then(() => {
-            setSyncLoader(false);
-        }).catch(error => {
-            console.error(error);
-            setSyncLoader(false, true);
-        });
     }
 }
 
@@ -402,8 +360,11 @@ function submitPassword() {
     pendingCallback = null;
 }
 
-// تمت إزالة قيود تسجيل الدخول من هنا للسماح بالحفظ الداخلي
 function prepareSaveAccount() {
+    if (!auth.currentUser) {
+        showToast("اتصل بحساب جوجل أولاً");
+        return;
+    }
     const email = document.getElementById('emailInput').value.trim();
     if (!email) {
         showToast("أدخل البيانات أولاً");
@@ -806,9 +767,14 @@ function handleVaultLongPress() {
     });
 }
 
-// تمت إزالة قيود الدخول من هنا أيضاً
 function openVaultCheck() {
     if(isLongPress) return;
+    
+    // فايربيز صار يتذكر إذا أنت مسجل دخول حتى لو مافي نت بفضل الـ Persistence
+    if (!auth.currentUser) {
+        showToast("اتصل بحساب جوجل أولاً للتمكن من العمل");
+        return;
+    }
 
     const vp = localStorage.getItem('vaultPass');
     if(vp) openPasswordModal("رمز الخزنة", v => { if(v===vp) openVault(); else showToast("خطأ"); });
@@ -864,25 +830,12 @@ function sendToKodular(message) {
     }
 }
 
-function toggleTheme() {
-    const body = document.body;
-    document.documentElement.removeAttribute('data-theme');
-    
-    body.classList.toggle('dark-theme');
-    const isDark = body.classList.contains('dark-theme');
-    
-    const themeIcon = document.getElementById('themeIcon');
-    if (themeIcon) themeIcon.innerText = isDark ? "☀️" : "🌙";
-    
-    localStorage.setItem('theme', isDark ? 'dark' : 'light');
-}
-
+// دالة الوضع الليلي والفاتح
 document.addEventListener('DOMContentLoaded', () => {
     document.documentElement.removeAttribute('data-theme');
     const savedTheme = localStorage.getItem('theme');
     const themeIcon = document.getElementById('themeIcon');
     
-    // التعديل هنا: إذا كان المحفوظ ليلي، شغله. غير هيك (أول مرة أو محفوظ فاتح) شغل الفاتح
     if (savedTheme === 'dark') {
         document.body.classList.add('dark-theme');
         if(themeIcon) themeIcon.innerText = "☀️";
@@ -895,11 +848,20 @@ document.addEventListener('DOMContentLoaded', () => {
     if (vaultList) {
         vaultList.addEventListener('scroll', cancelPress);
     }
-    
-    // إظهار المجلدات والحسابات فوراً عند فتح التطبيق أوفلاين
-    renderFoldersBar();
-    renderVault();
 });
+
+function toggleTheme() {
+    const body = document.body;
+    document.documentElement.removeAttribute('data-theme');
+    
+    body.classList.toggle('dark-theme');
+    const isDark = body.classList.contains('dark-theme');
+    
+    const themeIcon = document.getElementById('themeIcon');
+    if (themeIcon) themeIcon.innerText = isDark ? "☀️" : "🌙";
+    
+    localStorage.setItem('theme', isDark ? 'dark' : 'light');
+}
 
 function clearSearch() {
     document.getElementById('searchInput').value = '';
