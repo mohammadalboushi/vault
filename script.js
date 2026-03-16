@@ -13,13 +13,10 @@ const auth = firebase.auth();
 const db = firebase.firestore();
 const provider = new firebase.auth.GoogleAuthProvider();
 
-// 1. المصدر الأساسي للبيانات: الذاكرة المحلية (تفتح فوراً بدون انتظار الإنترنت)
-let localDb = JSON.parse(localStorage.getItem('my_vault_db')) || {};
-let accounts = localDb.accounts || [];
-let folders = localDb.folders || ["عام", "فيسبوك", "جوجل"];
-let lastSyncTime = localDb.lastSyncTime || 0; // الطابع الزمني الذكي
-
+let accounts = [];
+let folders = ["عام", "فيسبوك", "جوجل"];
 let unsubscribeVault = null;
+
 let longPressTimer, isLongPress = false;
 let currentCtxId = null, currentCtxType = null;
 let pendingCallback = null;
@@ -31,7 +28,6 @@ let folderRenameTarget = null;
 let vaultPressTimer = null;
 let currentSort = 'newest';
 
-// 2. مراقبة حالة تسجيل الدخول (لا تمسح البيانات عند الخروج لتظل متوفرة أوفلاين)
 auth.onAuthStateChanged(user => {
     const userNameEl = document.getElementById('userName');
     const userEmailEl = document.getElementById('userEmail');
@@ -42,15 +38,19 @@ auth.onAuthStateChanged(user => {
     if (user) {
         loginContainer.style.display = 'none';
         logoutContainer.style.display = 'block';
+        
         if(userNameEl) userNameEl.innerText = user.displayName || "مستخدم";
         if(userEmailEl) userEmailEl.innerText = user.email || "";
-        if(user.photoURL && userAvatarEl) userAvatarEl.innerHTML = `<img src="${user.photoURL}" alt="User">`;
         
-        // بدء المزامنة الذكية
+        const photoUrl = user.photoURL;
+        if(photoUrl && userAvatarEl) {
+            userAvatarEl.innerHTML = `<img src="${photoUrl}" alt="User">`;
+        }
         setupRealtimeListener(user.uid);
     } else {
         loginContainer.style.display = 'block';
         logoutContainer.style.display = 'none';
+        
         if(userNameEl) userNameEl.innerText = "مستخدم زائر";
         if(userEmailEl) userEmailEl.innerText = "سجل الدخول للمزامنة";
         if(userAvatarEl) userAvatarEl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
@@ -59,84 +59,13 @@ auth.onAuthStateChanged(user => {
             unsubscribeVault();
             unsubscribeVault = null;
         }
+        accounts = [];
+        folders = ["عام"];
         setSyncLoader(false, true);
     }
 });
 
-// 3. المزامنة الذكية التي تقارن الوقت وتمنع مسح البيانات
-function setupRealtimeListener(uid) {
-    setSyncLoader(true);
-    unsubscribeVault = db.collection('vaults').doc(uid).onSnapshot(docSnap => {
-        // تجاهل التحديثات الوهمية لتجنب تصفير البيانات
-        if (docSnap.metadata.hasPendingWrites) return;
-
-        if (docSnap.exists) {
-            const cloudData = docSnap.data();
-            const cloudTime = cloudData.lastSyncTime || 0;
-
-            if (cloudTime > lastSyncTime) {
-                // السحابة أحدث (تمت إضافة بيانات من جهاز آخر): نحدث هذا الجوال
-                accounts = cloudData.accounts || [];
-                folders = cloudData.folders || ["عام", "فيسبوك", "جوجل"];
-                lastSyncTime = cloudTime;
-                localStorage.setItem('my_vault_db', JSON.stringify({ accounts, folders, lastSyncTime }));
-                
-                if (document.getElementById('vaultPage').style.display === 'flex') {
-                    renderFoldersBar();
-                    renderVault();
-                }
-            } else if (lastSyncTime > cloudTime) {
-                // هذا الجوال أحدث (تمت إضافة ملاحظات أوفلاين): نرفع للسحابة
-                pushToCloud();
-            }
-        } else {
-            // السحابة فارغة: نرفع كل ما في الجوال لحمايته
-            if (accounts.length > 0) pushToCloud();
-        }
-        setSyncLoader(false);
-    }, err => {
-        console.warn("المزامنة معلقة (أوفلاين)");
-        setSyncLoader(false, true);
-    });
-}
-
-// 4. الحفظ دائمًا على الجوال فوراً، ثم محاولة الرفع
-function saveData() {
-    lastSyncTime = Date.now();
-    localStorage.setItem('my_vault_db', JSON.stringify({ accounts, folders, lastSyncTime }));
-    
-    if (document.getElementById('vaultPage').style.display === 'flex') {
-        renderFoldersBar();
-        renderVault();
-    }
-    
-    pushToCloud();
-}
-
-function pushToCloud() {
-    if (!auth.currentUser) return;
-    setSyncLoader(true);
-    db.collection('vaults').doc(auth.currentUser.uid).set({
-        accounts: accounts,
-        folders: folders,
-        lastSyncTime: lastSyncTime
-    }).then(() => {
-        setSyncLoader(false);
-    }).catch(err => {
-        // سيعاد المحاولة تلقائياً عند عودة الإنترنت
-        setSyncLoader(false, true);
-    });
-}
-
-// دفع البيانات فور استشعار المتصفح لعودة الإنترنت
-window.addEventListener('online', () => {
-    if (auth.currentUser && accounts.length > 0) {
-        pushToCloud();
-    }
-});
-
-// ======================= دوال الواجهة والقوائم ======================= //
-
+// دوال القائمة الجانبية (السحب)
 function safeToggleMenu(e) {
     if(e) e.stopPropagation();
     const menu = document.getElementById('sideMenu');
@@ -183,14 +112,18 @@ function startGoogleLogin() {
     closeSideMenu();
     showToast("جاري الاتصال بجوجل...");
     auth.signInWithPopup(provider).catch(error => {
+        console.error(error);
         showToast("فشل الدخول");
     });
 }
 
 function handleGoogleLogout() {
     closeSideMenu();
-    customConfirm("هل تريد تسجيل الخروج؟ ستبقى البيانات في جهازك.", () => {
+    customConfirm("هل تريد تسجيل الخروج؟", () => {
         auth.signOut().then(() => {
+            accounts = [];
+            folders = ["عام"];
+            renderVault();
             showToast("تم تسجيل الخروج");
         });
     });
@@ -204,6 +137,45 @@ function setSyncLoader(isSyncing, isError = false) {
         } else {
             dot.className = isSyncing ? 'sync-dot syncing' : 'sync-dot synced';
         }
+    }
+}
+
+function setupRealtimeListener(uid) {
+    setSyncLoader(true);
+    unsubscribeVault = db.collection('vaults').doc(uid).onSnapshot(docSnap => {
+        if(docSnap.exists) {
+            const data = docSnap.data();
+            accounts = data.accounts || [];
+            folders = data.folders || ["عام", "فيسبوك", "جوجل"];
+        } else {
+            accounts = [];
+            folders = ["عام", "فيسبوك", "جوجل"];
+            saveToCloud(); 
+        }
+        applySort(currentSort, false); 
+        renderFoldersBar();
+        setSyncLoader(false);
+    }, error => {
+        console.error(error);
+        setSyncLoader(false, true);
+        showToast("فشل جلب البيانات");
+    });
+}
+
+function saveToCloud() {
+    const user = auth.currentUser;
+    if(user) {
+        setSyncLoader(true);
+        db.collection('vaults').doc(user.uid).set({
+            accounts: accounts,
+            folders: folders
+        }).then(() => {
+            setSyncLoader(false);
+        }).catch(error => {
+            console.error(error);
+            setSyncLoader(false, true);
+            showToast("حدث خطأ أثناء الحفظ");
+        });
     }
 }
 
@@ -263,7 +235,8 @@ function importDataWrapper(e) {
                 }
             });
 
-            saveData();
+            saveToCloud();
+            renderFoldersBar();
             applySort(currentSort);
 
             if (cleanAccounts.length === 0 && rawAccounts.length > 0) {
@@ -305,18 +278,20 @@ function confirmDeleteAll() {
     closeSideMenu();
     customConfirm("حذف كل البيانات نهائياً؟", () => {
         accounts = []; folders = ["عام"];
-        saveData();
+        saveToCloud();
         showToast("تم تفريغ الخزنة");
     });
 }
 
+// تعديل أوبرا: إضافة رابط الصفحة حتى لا يطردك المتصفح
 function pushHistory(type = 'modal') { 
-    window.history.pushState({modal: type}, null, ''); 
+    window.history.pushState({modal: type}, null, window.location.href); 
 }
 
+// تعديل أوبرا: تأخير إغلاق النافذة أجزاء من الثانية
 function goBack() { 
     if(window.history.state) {
-        window.history.back();
+        setTimeout(() => window.history.back(), 20);
         return;
     }
     const overlays = document.querySelectorAll('.overlay');
@@ -370,8 +345,13 @@ function submitPassword() {
     pendingCallback = null;
 }
 
-// إضافة حساب لا تتطلب تسجيل الدخول الآن
+// الإضافة مسموحة دائماً بدون قفل
 function prepareSaveAccount() {
+    if (!auth.currentUser) {
+        showToast("اتصل بحساب جوجل من القائمة أولاً");
+        return;
+    }
+
     const email = document.getElementById('emailInput').value.trim();
     if (!email) {
         showToast("أدخل البيانات أولاً");
@@ -396,7 +376,7 @@ function saveAccount(targetFolder) {
     }
 
     accounts.unshift({ id: Date.now(), email, pass, folder: targetFolder });
-    saveData();
+    saveToCloud();
     document.getElementById('emailInput').value = '';
     document.getElementById('passInput').value = '';
     applySort(currentSort); 
@@ -505,8 +485,9 @@ function deleteSelected() {
     const doDelete = () => {
         customConfirm(`هل أنت متأكد من الحذف؟`, () => {
             accounts = accounts.filter(acc => !selectedIds.has(acc.id));
-            saveData();
+            saveToCloud();
             toggleSelectionMode(); 
+            renderFoldersBar();
             showToast("تم الحذف");
         });
     };
@@ -548,6 +529,7 @@ function handlePassClick(id) {
     }
 }
 
+// تعديل أوبرا: حفظ البيانات أولاً ثم إغلاق النافذة
 function openFolderSelectModal(title) {
     showOverlay('folderSelectModal');
     document.getElementById('folderModalTitle').innerText = title;
@@ -557,16 +539,20 @@ function openFolderSelectModal(title) {
     addRow.className = 'move-folder-option';
     addRow.style.color = 'var(--primary)';
     addRow.innerHTML = '+ مجلد جديد';
-    addRow.onclick = () => { goBack(); setTimeout(openAddFolderModal, 200); };
+    addRow.onclick = () => { 
+        setTimeout(openAddFolderModal, 200); 
+        goBack(); 
+    };
     listBody.appendChild(addRow);
     folders.forEach(f => {
         const row = document.createElement('div');
         row.className = 'move-folder-option';
         row.innerText = f;
         row.onclick = () => {
-            goBack();
             if (isMoveAction) executeMove(f);
             else saveAccount(f);
+            
+            setTimeout(() => goBack(), 50);
         };
         listBody.appendChild(row);
     });
@@ -580,7 +566,7 @@ function openMoveModal() {
 
 function executeMove(targetFolder) {
     accounts.forEach(acc => { if(selectedIds.has(acc.id)) acc.folder = targetFolder; });
-    saveData();
+    saveToCloud();
     toggleSelectionMode(); activeFolder = targetFolder;
     showToast("تم النقل");
 }
@@ -594,6 +580,7 @@ function openAddFolderModal(renameTarget = null) {
     input.focus();
 }
 
+// تعديل أوبرا: حفظ البيانات أولاً ثم إغلاق النافذة
 function submitFolder() {
     const name = document.getElementById('folderNameInput').value.trim();
     if(!name) return;
@@ -604,7 +591,8 @@ function submitFolder() {
     } else {
         if(!folders.includes(name)) folders.push(name);
     }
-    saveData(); goBack();
+    saveToCloud(); 
+    setTimeout(() => goBack(), 50);
 }
 
 function startFolderPress(f) {
@@ -665,7 +653,7 @@ function saveNewOrder() {
          });
          accounts = newAccounts;
     }
-    saveData();
+    saveToCloud();
 }
 
 function startPress(type, id) {
@@ -695,7 +683,9 @@ function ctxAction(action) {
             const doDelete = () => {
                 customConfirm("حذف نهائي؟", () => {
                     accounts = accounts.filter(a => a.id !== currentCtxId);
-                    saveData();
+                    saveToCloud();
+                    renderVault();
+                    renderFoldersBar();
                     showToast("تم الحذف");
                 });
             };
@@ -714,7 +704,9 @@ function ctxAction(action) {
                 document.getElementById('emailInput').value = acc.email;
                 document.getElementById('passInput').value = acc.pass;
                 accounts = accounts.filter(a => a.id !== currentCtxId);
-                saveData(); 
+                saveToCloud(); 
+                renderVault();
+                renderFoldersBar();
                 if(document.getElementById('vaultPage').style.display === 'flex') goBack();
             };
 
@@ -769,9 +761,13 @@ function handleVaultLongPress() {
     });
 }
 
-// أزلنا قيود الدخول نهائياً، يفتح فوراً
 function openVaultCheck() {
     if(isLongPress) return;
+    
+    if (!auth.currentUser) {
+        showToast("اتصل بحساب جوجل من القائمة أولاً");
+        return;
+    }
 
     const vp = localStorage.getItem('vaultPass');
     if(vp) openPasswordModal("رمز الخزنة", v => { if(v===vp) openVault(); else showToast("خطأ"); });
@@ -827,31 +823,6 @@ function sendToKodular(message) {
     }
 }
 
-// تحميل الألوان والبيانات فوراً
-document.addEventListener('DOMContentLoaded', () => {
-    document.documentElement.removeAttribute('data-theme');
-    const savedTheme = localStorage.getItem('theme');
-    const themeIcon = document.getElementById('themeIcon');
-    
-    // الأساسي فاتح (إذا كان محفوظ داكن فقط بيشغل الداكن)
-    if (savedTheme === 'dark') {
-        document.body.classList.add('dark-theme');
-        if(themeIcon) themeIcon.innerText = "☀️";
-    } else {
-        document.body.classList.remove('dark-theme');
-        if(themeIcon) themeIcon.innerText = "🌙";
-    }
-
-    const vaultList = document.getElementById('vaultList');
-    if (vaultList) {
-        vaultList.addEventListener('scroll', cancelPress);
-    }
-    
-    // إظهار البيانات فوراً بدون انتظار
-    renderFoldersBar();
-    renderVault();
-});
-
 function toggleTheme() {
     const body = document.body;
     document.documentElement.removeAttribute('data-theme');
@@ -864,6 +835,25 @@ function toggleTheme() {
     
     localStorage.setItem('theme', isDark ? 'dark' : 'light');
 }
+
+document.addEventListener('DOMContentLoaded', () => {
+    document.documentElement.removeAttribute('data-theme');
+    const savedTheme = localStorage.getItem('theme');
+    const themeIcon = document.getElementById('themeIcon');
+    
+    if (savedTheme === 'light') {
+        document.body.classList.remove('dark-theme');
+        if(themeIcon) themeIcon.innerText = "🌙";
+    } else {
+        document.body.classList.add('dark-theme');
+        if(themeIcon) themeIcon.innerText = "☀️";
+    }
+
+    const vaultList = document.getElementById('vaultList');
+    if (vaultList) {
+        vaultList.addEventListener('scroll', cancelPress);
+    }
+});
 
 function clearSearch() {
     document.getElementById('searchInput').value = '';
