@@ -35,6 +35,26 @@ let folderRenameTarget = null;
 let vaultPressTimer = null;
 let currentSort = 'newest';
 
+// --- التعديل الجديد: نظام التشفير ---
+const SECRET_KEY = "AbuFayez_Secure_Vault_2026"; // غير هاد المفتاح لشي سري وخاص فيك
+
+function encryptPass(text) {
+    if (!text) return "";
+    return CryptoJS.AES.encrypt(text, SECRET_KEY).toString();
+}
+
+function decryptPass(ciphertext) {
+    if (!ciphertext) return "";
+    try {
+        const bytes = CryptoJS.AES.decrypt(ciphertext, SECRET_KEY);
+        const originalText = bytes.toString(CryptoJS.enc.Utf8);
+        return originalText || ciphertext; // إذا فشل التشفير بيرجع النص متل ما هو (للحسابات القديمة)
+    } catch (e) {
+        return ciphertext;
+    }
+}
+// ----------------------------------
+
 auth.onAuthStateChanged(user => {
     const userNameEl = document.getElementById('userName');
     const userEmailEl = document.getElementById('userEmail');
@@ -262,7 +282,7 @@ function importDataWrapper(e) {
                     cleanAccounts.push({
                         id: importedAcc.id || Date.now() + Math.random(),
                         email: rawEmail,
-                        pass: importedAcc.pass || "...",
+                        pass: importedAcc.pass || "...", // هاد ممكن يكون مشفر أو لأ حسب المصدر
                         folder: folder
                     });
                 }
@@ -328,12 +348,10 @@ function confirmDeleteAll() {
     });
 }
 
-// تعديل أوبرا: إضافة رابط الصفحة حتى لا يطردك المتصفح
 function pushHistory(type = 'modal') { 
     window.history.pushState({modal: type}, null, window.location.href); 
 }
 
-// تعديل أوبرا: تأخير إغلاق النافذة أجزاء من الثانية
 function goBack() { 
     if(window.history.state) {
         setTimeout(() => window.history.back(), 20);
@@ -390,7 +408,6 @@ function submitPassword() {
     pendingCallback = null;
 }
 
-// الإضافة مسموحة دائماً بدون قفل
 function prepareSaveAccount() {
     const email = document.getElementById('emailInput').value.trim();
     if (!email) {
@@ -415,7 +432,11 @@ function saveAccount(targetFolder) {
         return;
     }
 
-    accounts.unshift({ id: Date.now(), email, pass, folder: targetFolder });
+    // --- التعديل: تشفير كلمة السر قبل الحفظ ---
+    const encryptedPass = encryptPass(pass);
+    accounts.unshift({ id: Date.now(), email, pass: encryptedPass, folder: targetFolder });
+    // ----------------------------------------
+
     saveToCloud();
     document.getElementById('emailInput').value = '';
     document.getElementById('passInput').value = '';
@@ -559,7 +580,9 @@ function handlePassClick(id) {
     const el = document.getElementById(`pass-${id}`);
     const acc = accounts.find(a => a.id === id);
     if(el.classList.contains('hidden-pass')) {
-         el.innerText = acc.pass || '...'; 
+         // --- التعديل: فك التشفير عند العرض ---
+         el.innerText = decryptPass(acc.pass) || '...'; 
+         // -------------------------------------
          el.classList.remove('hidden-pass');
          el.style.fontSize = "16px"; el.style.letterSpacing = "0";
     } else { 
@@ -569,7 +592,6 @@ function handlePassClick(id) {
     }
 }
 
-// تعديل أوبرا: حفظ البيانات أولاً ثم إغلاق النافذة
 function openFolderSelectModal(title) {
     showOverlay('folderSelectModal');
     document.getElementById('folderModalTitle').innerText = title;
@@ -620,7 +642,6 @@ function openAddFolderModal(renameTarget = null) {
     input.focus();
 }
 
-// تعديل أوبرا: حفظ البيانات أولاً ثم إغلاق النافذة
 function submitFolder() {
     const name = document.getElementById('folderNameInput').value.trim();
     if(!name) return;
@@ -717,7 +738,10 @@ function ctxAction(action) {
         if (!acc) return;
         
         if (action === 'copy') {
-            copyToClipboard(currentCtxType === 'email' ? acc.email : acc.pass);
+            // --- التعديل: فك تشفير الباسورد قبل النسخ ---
+            const textToCopy = currentCtxType === 'email' ? acc.email : decryptPass(acc.pass);
+            copyToClipboard(textToCopy);
+            // ------------------------------------------
         } 
         else if (action === 'delete') {
             const doDelete = () => {
@@ -742,7 +766,9 @@ function ctxAction(action) {
         else if (action === 'edit') {
             const doEdit = () => {
                 document.getElementById('emailInput').value = acc.email;
-                document.getElementById('passInput').value = acc.pass;
+                // --- التعديل: فك التشفير قبل تعبئة حقل التعديل ---
+                document.getElementById('passInput').value = decryptPass(acc.pass);
+                // -----------------------------------------------
                 accounts = accounts.filter(a => a.id !== currentCtxId);
                 saveToCloud(); 
                 renderVault();
@@ -876,7 +902,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const savedTheme = localStorage.getItem('theme');
     const themeIcon = document.getElementById('themeIcon');
     
-    // التعديل هنا: الوضع الفاتح هو الأساسي (إلا إذا كان المستخدم مختار ليلي مسبقاً)
     if (savedTheme === 'dark') {
         document.body.classList.add('dark-theme');
         if(themeIcon) themeIcon.innerText = "☀️";
