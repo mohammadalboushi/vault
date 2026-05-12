@@ -279,12 +279,19 @@ function importDataWrapper(e) {
 
                 if (!seenCombinations.has(combo)) {
                     seenCombinations.add(combo);
-                    cleanAccounts.push({
-                        id: importedAcc.id || Date.now() + Math.random(),
-                        email: rawEmail,
-                        pass: importedAcc.pass || "...", // هاد ممكن يكون مشفر أو لأ حسب المصدر
-                        folder: folder
-                    });
+                    // فحص ذكي: إذا الباسورد مو مشفر، بيشفره. وإذا مشفر خلقة، بيتركه متل ما هو
+let finalPass = importedAcc.pass || "...";
+if (!finalPass.startsWith("U2FsdGVkX1")) {
+    finalPass = encryptPass(finalPass);
+}
+
+cleanAccounts.push({
+    id: importedAcc.id || Date.now() + Math.random(),
+    email: rawEmail,
+    pass: finalPass,
+    folder: folder
+});
+
                 }
             });
 
