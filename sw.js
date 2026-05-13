@@ -1,4 +1,4 @@
-const CACHE_NAME = 'vault-cache-v11';
+const CACHE_NAME = 'vault-cache-v21';
 
 const urlsToCache = [
   './',
